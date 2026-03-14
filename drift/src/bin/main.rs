@@ -60,7 +60,6 @@ impl<'a> MotorController<'a> {
 
     fn set_motion(&mut self, direction: MotorDirection, speed: u16, fade_ms: u16) {
         let speed_clamped = speed.min(100) as u8;
-
         match direction {
             MotorDirection::Clockwise => {
                 self.dir.set_low();
@@ -159,40 +158,65 @@ struct Cell {
 }
 
 struct Encoders<'e> {
-    zero_left: Input<'e>,
-    zero_right: Input<'e>,
+    left_a: Input<'e>,  // GPIO9  — left
+    left_b: Input<'e>,  // GPIO20 — left second
+    right_a: Input<'e>, // GPIO21 — right
+    right_b: Input<'e>, // GPIO4  — right second
 }
 
 impl<'e> Encoders<'e> {
-    fn new(zero_left: Input<'e>, zero_right: Input<'e>) -> Self {
+    fn new(left_a: Input<'e>, left_b: Input<'e>, right_a: Input<'e>, right_b: Input<'e>) -> Self {
         Self {
-            zero_left,
-            zero_right,
+            left_a,
+            left_b,
+            right_a,
+            right_b,
         }
     }
-    fn forward_one(&self, drive: &mut DifferentialDrive) {
-        let mut delay = Delay::new();
-        let mut prev0 = self.zero_left.is_high();
-        let mut prev1 = self.zero_right.is_high();
-        let mut edge0 = 0;
-        let mut edge1 = 0;
-        drive.execute(VehicleMotion::Forward, 100, 300);
-        for _ in 0..14 {
-            delay.delay_millis(100);
-            let now0 = self.zero_left.is_high();
-            let now1 = self.zero_right.is_high();
-            if (now0 != prev0) && (now1 != prev1) {
-                edge0 += 1;
-                prev0 = now0;
-                edge1 += 1;
-                prev1 = now1;
+}
 
-                if (edge0 == 8) | (edge1 == 8) {
-                    drive.execute(VehicleMotion::Stop, 0, 0);
-                    delay.delay_millis(150);
-                }
-            }
+fn forward_one(encoders: &Encoders, drive: &mut DifferentialDrive, delay: &mut Delay) {
+    let mut prev_la = encoders.left_a.is_high();
+    let mut prev_lb = encoders.left_b.is_high();
+    let mut prev_ra = encoders.right_a.is_high();
+    let mut prev_rb = encoders.right_b.is_high();
+
+    let mut edges_l: u32 = 0;
+    let mut edges_r: u32 = 0;
+
+    drive.execute(VehicleMotion::Forward, 100, 200);
+
+    loop {
+        let now_la = encoders.left_a.is_high();
+        let now_lb = encoders.left_b.is_high();
+        let now_ra = encoders.right_a.is_high();
+        let now_rb = encoders.right_b.is_high();
+
+        if now_la != prev_la {
+            edges_l += 1;
+            prev_la = now_la;
         }
+        if now_lb != prev_lb {
+            edges_l += 1;
+            prev_lb = now_lb;
+        }
+        if now_ra != prev_ra {
+            edges_r += 1;
+            prev_ra = now_ra;
+        }
+        if now_rb != prev_rb {
+            edges_r += 1;
+            prev_rb = now_rb;
+        }
+
+        if edges_l >= TARGET_EDGES_900 && edges_r >= TARGET_EDGES_900 {
+            drive.execute(VehicleMotion::Stop, 0, 0);
+            delay.delay_millis(200);
+            info!("LEG_COMPLETE: L={} R={} edges", edges_l, edges_r);
+            break;
+        }
+
+        delay.delay_millis(2);
     }
 }
 
@@ -239,6 +263,8 @@ const REG_ACCEL_ZOUT_H: u8 = 0x3F;
 const REG_ACCEL_CONFIG: u8 = 0x1C;
 const ACCEL_SENSITIVITY: f32 = 16384.0;
 const GYRO_SENSITIVITY: f32 = 131.0;
+const MM_PER_EDGE: f32 = 0.5483;
+const TARGET_EDGES_900: u32 = 1641;
 
 use esp_hal::i2c::master::BusTimeout;
 struct Mpu6050<'d> {
@@ -399,9 +425,11 @@ fn main() -> ! {
     let l_dir = Output::new(peripherals.GPIO2, Level::Low, outconfig);
     let l_pwm = peripherals.GPIO3;
 
-    let encoder1 = Input::new(peripherals.GPIO21, inconfig);
-    let encoder0 = Input::new(peripherals.GPIO9, inconfig);
-    let encoders = Encoders::new(encoder1, encoder0);
+    let left_a = Input::new(peripherals.GPIO9, inconfig);
+    let left_b = Input::new(peripherals.GPIO4, inconfig);
+    let right_a = Input::new(peripherals.GPIO21, inconfig);
+    let right_b = Input::new(peripherals.GPIO5, inconfig);
+    let encoders = Encoders::new(left_a, left_b, right_a, right_b);
 
     let mut ledc = Ledc::new(peripherals.LEDC);
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
@@ -442,11 +470,10 @@ fn main() -> ! {
     .with_scl(peripherals.GPIO8);
     let mut mpu = Mpu6050::new(i2c);
 
-    delay.delay_millis(2000); // startup settling
+    delay.delay_millis(2000);
 
     mpu.init(&mut delay);
     if mpu.verify() {
-        // ← verify first
         info!("MPU6050: HANDSHAKE_OK");
     } else {
         info!("FAULT: MPU6050_NOT_FOUND");
@@ -456,57 +483,58 @@ fn main() -> ! {
     }
     delay.delay_millis(500);
     let bias = ImuBias::calibrate(&mut mpu, &mut delay);
+    delay.delay_millis(2000);
 
-    delay.delay_millis(2000); // pre-motion settling
+    info!("CALIBRATION: FORWARD 5 SECONDS — STARTING");
+    drive.execute(VehicleMotion::Forward, 150, 50);
 
-    info!("MOTION: FORWARD");
-    drive.execute(VehicleMotion::Forward, 100, 200);
-    for _ in 0..50 {
-        let (ax, ay, az, gz) = mpu.read_corrected(&bias);
-        info!("GYRO_Z: {} | AX: {} | AY: {} | AZ: {}", gz, ax, ay, az);
-        delay.delay_millis(100);
+    let mut prev_la = encoders.left_a.is_high();
+    let mut prev_lb = encoders.left_b.is_high();
+    let mut prev_ra = encoders.right_a.is_high();
+    let mut prev_rb = encoders.right_b.is_high();
+
+    let mut edges_la: u32 = 0;
+    let mut edges_lb: u32 = 0;
+    let mut edges_ra: u32 = 0;
+    let mut edges_rb: u32 = 0;
+
+    for _ in 0..1000 {
+        let now_la = encoders.left_a.is_high();
+        let now_lb = encoders.left_b.is_high();
+        let now_ra = encoders.right_a.is_high();
+        let now_rb = encoders.right_b.is_high();
+
+        if now_la != prev_la {
+            edges_la += 1;
+            prev_la = now_la;
+        }
+        if now_lb != prev_lb {
+            edges_lb += 1;
+            prev_lb = now_lb;
+        }
+        if now_ra != prev_ra {
+            edges_ra += 1;
+            prev_ra = now_ra;
+        }
+        if now_rb != prev_rb {
+            edges_rb += 1;
+            prev_rb = now_rb;
+        }
+
+        delay.delay_millis(5);
     }
-    drive.execute(VehicleMotion::Stop, 0, 0);
-    delay.delay_millis(500);
 
-    info!("MOTION: SPIN_CW");
-    drive.execute(VehicleMotion::SpinCW, 60, 0);
-    for _ in 0..20 {
-        let omega_z = mpu.read_gyro_z_dps();
-        let (ax, ay, az, gz) = mpu.read_corrected(&bias);
-        info!("GYRO_Z: {} | AX: {} | AY: {} | AZ: {}", gz, ax, ay, az);
-        delay.delay_millis(100);
-    }
     drive.execute(VehicleMotion::Stop, 0, 0);
-    delay.delay_millis(500);
+    delay.delay_millis(300);
 
-    info!("MOTION: BACKWARD");
-    drive.execute(VehicleMotion::Backward, 70, 200);
-    for _ in 0..50 {
-        let omega_z = mpu.read_gyro_z_dps();
-        let (ax, ay, az, gz) = mpu.read_corrected(&bias);
-        info!("GYRO_Z: {} | AX: {} | AY: {} | AZ: {}", gz, ax, ay, az);
-        delay.delay_millis(100);
-    }
-    drive.execute(VehicleMotion::Stop, 0, 0);
-    delay.delay_millis(500);
+    info!("EDGES_LEFT_A:      {}", edges_la);
+    info!("EDGES_LEFT_B:      {}", edges_lb);
+    info!("EDGES_RIGHT_A:     {}", edges_ra);
+    info!("EDGES_RIGHT_B:     {}", edges_rb);
+    info!("EDGES_LEFT_TOTAL:  {}", edges_la + edges_lb);
+    info!("EDGES_RIGHT_TOTAL: {}", edges_ra + edges_rb);
 
-    info!("MOTION: SPIN_CCW");
-    drive.execute(VehicleMotion::SpinCCW, 60, 0);
-    for _ in 0..20 {
-        let omega_z = mpu.read_gyro_z_dps();
-        let (ax, ay, az, gz) = mpu.read_corrected(&bias);
-        info!("GYRO_Z: {} | AX: {} | AY: {} | AZ: {}", gz, ax, ay, az);
-        delay.delay_millis(100);
-    }
-    drive.execute(VehicleMotion::Stop, 0, 0);
-    delay.delay_millis(500);
-
-    info!("SEQUENCE_COMPLETE: ENTERING_IDLE");
     loop {
-        let omega_z = mpu.read_gyro_z_dps();
-        let (ax, ay, az, gz) = mpu.read_corrected(&bias);
-        info!("GYRO_Z: {} | AX: {} | AY: {} | AZ: {}", gz, ax, ay, az);
-        delay.delay_millis(200);
+        delay.delay_millis(1000);
     }
 }
