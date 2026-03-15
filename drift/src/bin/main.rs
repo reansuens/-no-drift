@@ -206,7 +206,7 @@ fn forward_one(
 
     // PID GAINS — tune these
     const KP: f32 = 2.0;
-    const KI: f32 = 0.08;
+    const KI: f32 = 0.03;
     const KD: f32 = 0.6;
     const BASE_SPEED: u16 = 200;
 
@@ -284,18 +284,19 @@ fn turn_90_ccw(
     delay: &mut Delay,
 ) {
     let mut heading: f32 = 0.0;
-    let dt_ms: f32 = 10.0;
-
-    drive.execute(VehicleMotion::SpinCCW, 60, 0);
+    let mut angular_v: f32 = 0.0;
+    let dt_ms: f32 = 50.0 / 2.33;
+    let gz_bias = bias.gz_bias.abs();
+    drive.execute(VehicleMotion::SpinCCW, 95, 0);
 
     loop {
         let (_, _, _, gz) = mpu.read_corrected(bias);
-        heading += gz * (dt_ms / 1000.0);
-
+        angular_v += gz * (dt_ms / 1000.0);
+        heading += angular_v * (dt_ms / 1000.0);
         info!("TURN_CCW: heading={}", heading);
 
         // CCW → positive gz → heading goes positive
-        if heading >= 60.0 {
+        if heading >= 90.0 - gz_bias {
             drive.execute(VehicleMotion::Stop, 0, 0);
             delay.delay_millis(150);
             info!("TURN_COMPLETE: heading={}", heading);
@@ -370,8 +371,8 @@ fn forward_one_open(encoders: &Encoders, drive: &mut DifferentialDrive, delay: &
 
 fn execute_square_open_loop(encoders: &Encoders, drive: &mut DifferentialDrive, delay: &mut Delay) {
     // Uses timer-based turns — no gyro
-    // baseline drift measurement
-    const TURN_MS: u32 = 500; // tune this to approximate 90°
+    // This is your baseline drift measurement
+    const TURN_MS: u32 = 400; // tune this to approximate 90°
 
     for leg in 0..4u8 {
         info!("OPEN_LOOP: LEG {}", leg);
@@ -653,14 +654,26 @@ fn main() -> ! {
     delay.delay_millis(500);
     let bias = ImuBias::calibrate(&mut mpu, &mut delay);
     delay.delay_millis(2000);
-
-    info!("TEST: SINGLE FORWARD LEG — PLACE ROBOT");
+    // ── TEST: SINGLE TURN ONLY ───────────────────────────────────
+    // Verify turn_90_ccw works before running full square
+    info!("TEST: SINGLE CCW TURN — PLACE ROBOT, STEP BACK");
     delay.delay_millis(3000);
 
-    forward_one(&encoders, &mut mpu, &bias, &mut drive, &mut delay);
+    turn_90_ccw(&mut mpu, &bias, &mut drive, &mut delay);
 
-    info!("LEG_TEST_COMPLETE — MEASURE DISTANCE");
+    info!("TURN_TEST_COMPLETE — CHECK PHYSICAL ANGLE");
     loop {
         delay.delay_millis(1000);
     }
+
+    //// ── TEST: SINGLE FORWARD LEG ─────────────────────────────────
+    //info!("TEST: SINGLE FORWARD LEG — PLACE ROBOT");
+    //delay.delay_millis(3000);
+    //
+    //forward_one(&encoders, &mut mpu, &bias, &mut drive, &mut delay);
+    //
+    //info!("LEG_TEST_COMPLETE — MEASURE DISTANCE");
+    //loop {
+    //    delay.delay_millis(1000);
+    //}
 }
