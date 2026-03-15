@@ -63,7 +63,7 @@ impl<'a> MotorController<'a> {
         match direction {
             MotorDirection::Clockwise => {
                 self.dir.set_low();
-                self.pwm.start_duty_fade(0, speed as u8, fade_ms);
+                self.pwm.set_duty(speed as u8);
             }
             MotorDirection::CounterClockwise => {
                 self.dir.set_high();
@@ -147,10 +147,16 @@ impl<'a> DifferentialDrive<'a> {
             }
         }
     }
+    fn set_speeds(&mut self, left: u16, right: u16) {
+        self.motor_left
+            .set_motion(MotorDirection::Clockwise, left, 0);
+        self.motor_right
+            .set_motion(MotorDirection::CounterClockwise, right, 0);
+    }
 }
 
 // TRACK
-const MOTION: usize = 900;
+const MOTION: usize = 800;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Cell {
@@ -175,7 +181,13 @@ impl<'e> Encoders<'e> {
     }
 }
 
-fn forward_one(encoders: &Encoders, drive: &mut DifferentialDrive, delay: &mut Delay) {
+fn forward_one(
+    encoders: &Encoders,
+    mpu: &mut Mpu6050,
+    bias: &ImuBias,
+    drive: &mut DifferentialDrive,
+    delay: &mut Delay,
+) {
     let mut prev_la = encoders.left_a.is_high();
     let mut prev_lb = encoders.left_b.is_high();
     let mut prev_ra = encoders.right_a.is_high();
@@ -184,7 +196,144 @@ fn forward_one(encoders: &Encoders, drive: &mut DifferentialDrive, delay: &mut D
     let mut edges_l: u32 = 0;
     let mut edges_r: u32 = 0;
 
-    drive.execute(VehicleMotion::Forward, 100, 200);
+    // HEADING INTEGRATOR — tracks drift from straight
+    let mut heading: f32 = 0.0;
+    let dt_ms: f32 = 10.0;
+
+    // PID STATE
+    let mut integral: f32 = 0.0;
+    let mut prev_err: f32 = 0.0;
+
+    // PID GAINS — tune these
+    const KP: f32 = 2.0;
+    const KI: f32 = 0.08;
+    const KD: f32 = 0.6;
+    const BASE_SPEED: u16 = 200;
+
+    loop {
+        // ENCODER EDGE DETECTION
+        let now_la = encoders.left_a.is_high();
+        let now_lb = encoders.left_b.is_high();
+        let now_ra = encoders.right_a.is_high();
+        let now_rb = encoders.right_b.is_high();
+
+        if now_la != prev_la {
+            edges_l += 1;
+            prev_la = now_la;
+        }
+        if now_lb != prev_lb {
+            edges_l += 1;
+            prev_lb = now_lb;
+        }
+        if now_ra != prev_ra {
+            edges_r += 1;
+            prev_ra = now_ra;
+        }
+        if now_rb != prev_rb {
+            edges_r += 1;
+            prev_rb = now_rb;
+        }
+
+        // GYRO HEADING UPDATE
+        let (_, _, _, gz) = mpu.read_corrected(bias);
+        heading += gz * (dt_ms / 1000.0);
+
+        // PID — error = how far we drifted from straight (0°)
+        let err = heading; // target = 0°
+        integral += err * (dt_ms / 1000.0);
+        let deriv = (err - prev_err) / (dt_ms / 1000.0);
+        let u = KP * err + KI * integral + KD * deriv;
+        prev_err = err;
+
+        // DIFFERENTIAL PWM CORRECTION
+        // positive heading (CCW drift) → increase right, decrease left
+        let pwm_l = (BASE_SPEED as f32 - u).clamp(30.0, 100.0) as u16;
+        let pwm_r = (BASE_SPEED as f32 + u).clamp(30.0, 100.0) as u16;
+
+        drive
+            .motor_left
+            .set_motion(MotorDirection::Clockwise, pwm_l, 100);
+        drive
+            .motor_right
+            .set_motion(MotorDirection::CounterClockwise, pwm_r, 100);
+
+        info!(
+            "heading={} u={} pwm_l={} pwm_r={} el={} er={}",
+            heading, u, pwm_l, pwm_r, edges_l, edges_r
+        );
+
+        // STOP CONDITION
+        if (edges_l + edges_r) / 2 >= TARGET_EDGES_800 {
+            drive.execute(VehicleMotion::Stop, 0, 0);
+            delay.delay_millis(200);
+            info!(
+                "LEG_COMPLETE: heading_final={} L={} R={}",
+                heading, edges_l, edges_r
+            );
+            break;
+        }
+
+        delay.delay_millis(10);
+    }
+}
+
+fn turn_90_ccw(
+    mpu: &mut Mpu6050,
+    bias: &ImuBias,
+    drive: &mut DifferentialDrive,
+    delay: &mut Delay,
+) {
+    let mut heading: f32 = 0.0;
+    let dt_ms: f32 = 10.0;
+
+    drive.execute(VehicleMotion::SpinCCW, 60, 0);
+
+    loop {
+        let (_, _, _, gz) = mpu.read_corrected(bias);
+        heading += gz * (dt_ms / 1000.0);
+
+        info!("TURN_CCW: heading={}", heading);
+
+        // CCW → positive gz → heading goes positive
+        if heading >= 60.0 {
+            drive.execute(VehicleMotion::Stop, 0, 0);
+            delay.delay_millis(150);
+            info!("TURN_COMPLETE: heading={}", heading);
+            break;
+        }
+
+        delay.delay_millis(10);
+    }
+}
+fn execute_square(
+    encoders: &Encoders,
+    mpu: &mut Mpu6050,
+    bias: &ImuBias,
+    drive: &mut DifferentialDrive,
+    delay: &mut Delay,
+) {
+    for leg in 0..4u8 {
+        info!("SQUARE: LEG {}", leg);
+        forward_one(encoders, mpu, bias, drive, delay);
+        delay.delay_millis(400);
+
+        if leg < 3 {
+            info!("SQUARE: TURN {}", leg);
+            turn_90_ccw(mpu, bias, drive, delay);
+            delay.delay_millis(400);
+        }
+    }
+    info!("SQUARE: COMPLETE — MEASURE RETURN ERROR NOW");
+}
+fn forward_one_open(encoders: &Encoders, drive: &mut DifferentialDrive, delay: &mut Delay) {
+    let mut prev_la = encoders.left_a.is_high();
+    let mut prev_lb = encoders.left_b.is_high();
+    let mut prev_ra = encoders.right_a.is_high();
+    let mut prev_rb = encoders.right_b.is_high();
+    let mut edges_l: u32 = 0;
+    let mut edges_r: u32 = 0;
+
+    drive.execute(VehicleMotion::Forward, 200, 100);
 
     loop {
         let now_la = encoders.left_a.is_high();
@@ -209,15 +358,35 @@ fn forward_one(encoders: &Encoders, drive: &mut DifferentialDrive, delay: &mut D
             prev_rb = now_rb;
         }
 
-        if edges_l >= TARGET_EDGES_900 && edges_r >= TARGET_EDGES_900 {
+        if edges_l >= TARGET_EDGES_800 && edges_r >= TARGET_EDGES_800 {
             drive.execute(VehicleMotion::Stop, 0, 0);
             delay.delay_millis(200);
-            info!("LEG_COMPLETE: L={} R={} edges", edges_l, edges_r);
+            info!("OPEN_LEG_COMPLETE: L={} R={}", edges_l, edges_r);
             break;
         }
-
-        delay.delay_millis(2);
+        delay.delay_millis(10);
     }
+}
+
+fn execute_square_open_loop(encoders: &Encoders, drive: &mut DifferentialDrive, delay: &mut Delay) {
+    // Uses timer-based turns — no gyro
+    // baseline drift measurement
+    const TURN_MS: u32 = 500; // tune this to approximate 90°
+
+    for leg in 0..4u8 {
+        info!("OPEN_LOOP: LEG {}", leg);
+        forward_one_open(encoders, drive, delay);
+        delay.delay_millis(400);
+
+        if leg < 3 {
+            info!("OPEN_LOOP: TURN {}", leg);
+            drive.execute(VehicleMotion::SpinCCW, 160, 0);
+            delay.delay_millis(TURN_MS);
+            drive.execute(VehicleMotion::Stop, 0, 0);
+            delay.delay_millis(400);
+        }
+    }
+    info!("OPEN_LOOP: COMPLETE — MEASURE RETURN ERROR NOW");
 }
 
 //const WALL_NORTH: u8 = 0b0001;
@@ -263,8 +432,8 @@ const REG_ACCEL_ZOUT_H: u8 = 0x3F;
 const REG_ACCEL_CONFIG: u8 = 0x1C;
 const ACCEL_SENSITIVITY: f32 = 16384.0;
 const GYRO_SENSITIVITY: f32 = 131.0;
-const MM_PER_EDGE: f32 = 0.5483;
-const TARGET_EDGES_900: u32 = 1641;
+const MM_PER_EDGE: f32 = 1.835;
+const TARGET_EDGES_800: u32 = 440;
 
 use esp_hal::i2c::master::BusTimeout;
 struct Mpu6050<'d> {
@@ -485,55 +654,12 @@ fn main() -> ! {
     let bias = ImuBias::calibrate(&mut mpu, &mut delay);
     delay.delay_millis(2000);
 
-    info!("CALIBRATION: FORWARD 5 SECONDS — STARTING");
-    drive.execute(VehicleMotion::Forward, 150, 50);
+    info!("TEST: SINGLE FORWARD LEG — PLACE ROBOT");
+    delay.delay_millis(3000);
 
-    let mut prev_la = encoders.left_a.is_high();
-    let mut prev_lb = encoders.left_b.is_high();
-    let mut prev_ra = encoders.right_a.is_high();
-    let mut prev_rb = encoders.right_b.is_high();
+    forward_one(&encoders, &mut mpu, &bias, &mut drive, &mut delay);
 
-    let mut edges_la: u32 = 0;
-    let mut edges_lb: u32 = 0;
-    let mut edges_ra: u32 = 0;
-    let mut edges_rb: u32 = 0;
-
-    for _ in 0..1000 {
-        let now_la = encoders.left_a.is_high();
-        let now_lb = encoders.left_b.is_high();
-        let now_ra = encoders.right_a.is_high();
-        let now_rb = encoders.right_b.is_high();
-
-        if now_la != prev_la {
-            edges_la += 1;
-            prev_la = now_la;
-        }
-        if now_lb != prev_lb {
-            edges_lb += 1;
-            prev_lb = now_lb;
-        }
-        if now_ra != prev_ra {
-            edges_ra += 1;
-            prev_ra = now_ra;
-        }
-        if now_rb != prev_rb {
-            edges_rb += 1;
-            prev_rb = now_rb;
-        }
-
-        delay.delay_millis(5);
-    }
-
-    drive.execute(VehicleMotion::Stop, 0, 0);
-    delay.delay_millis(300);
-
-    info!("EDGES_LEFT_A:      {}", edges_la);
-    info!("EDGES_LEFT_B:      {}", edges_lb);
-    info!("EDGES_RIGHT_A:     {}", edges_ra);
-    info!("EDGES_RIGHT_B:     {}", edges_rb);
-    info!("EDGES_LEFT_TOTAL:  {}", edges_la + edges_lb);
-    info!("EDGES_RIGHT_TOTAL: {}", edges_ra + edges_rb);
-
+    info!("LEG_TEST_COMPLETE — MEASURE DISTANCE");
     loop {
         delay.delay_millis(1000);
     }
