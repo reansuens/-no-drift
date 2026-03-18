@@ -210,11 +210,7 @@ impl KalmanHeading {
         }
     }
 
-    // PREDICT — gyro step
-    // gz     : raw gyro Z [deg/s] already bias-corrected from ImuBias
-    // dt     : timestep [seconds]
     fn predict(&mut self, gz: f32, dt: f32) {
-        // Process noise — how much we trust gyro
         // tune
         const Q_ANGLE: f32 = 0.01;
         const Q_BIAS: f32 = 0.1;
@@ -229,18 +225,14 @@ impl KalmanHeading {
         self.p11 += Q_BIAS * dt;
     }
 
-    // UPDATE — measurement correction
-    // measurement : lateral deviation estimate [degrees]
-    //               computed from encoder diff and/or accel
     fn update(&mut self, measurement: f32) -> f32 {
-        // Measurement noise — how much we trust encoder/accel
         const R_MEASURE: f32 = 0.8;
 
         let s = self.p00 + R_MEASURE;
-        let k0 = self.p00 / s; // Kalman gain for angle
-        let k1 = self.p10 / s; // Kalman gain for bias
+        let k0 = self.p00 / s;
+        let k1 = self.p10 / s;
 
-        let y = measurement - self.angle; // innovation
+        let y = measurement - self.angle;
 
         self.angle += k0 * y;
         self.bias += k1 * y;
@@ -253,7 +245,7 @@ impl KalmanHeading {
         self.p10 -= k1 * p00_tmp;
         self.p11 -= k1 * p01_tmp;
 
-        self.angle // return best heading estimate
+        self.angle
     }
 
     fn angle(&self) -> f32 {
@@ -280,12 +272,12 @@ fn forward_one(
     let mut prev_err: f32 = 0.0;
 
     const DT_MS: f32 = 50.0;
-    const BASE_SPEED: f32 = 200.0;
+    const BASE_SPEED: f32 = 150.0;
     const KP: f32 = 3.2;
     const KI: f32 = 0.06;
-    const KD: f32 = 0.15;
+    const KD: f32 = 0.25;
     const F: f32 = 0.95;
-    const TAU: f32 = 0.51;
+    const TAU: f32 = 0.7;
 
     loop {
         let dt = DT_MS / 5.0;
@@ -324,8 +316,8 @@ fn forward_one(
         let deriv = (err - prev_err) / dt;
         let u = KP * err + KI * integral + KD * deriv;
         prev_err = err;
-        let pwm_l = (BASE_SPEED as f32 - u).clamp(200.0, 255.0) as u16;
-        let pwm_r = (BASE_SPEED as f32 + u).clamp(200.0, 255.0) as u16;
+        let pwm_l = (BASE_SPEED as f32 - u) as u16;
+        let pwm_r = (BASE_SPEED as f32 + u) as u16;
         //drive.set_speeds(pwm_l as u16, pwm_r as u16);
 
         drive.set_speeds(pwm_l, pwm_r);
@@ -555,7 +547,7 @@ const REG_ACCEL_CONFIG: u8 = 0x1C;
 const ACCEL_SENSITIVITY: f32 = 16384.0;
 const GYRO_SENSITIVITY: f32 = 131.0;
 const MM_PER_EDGE: f32 = 1.835;
-const TARGET_EDGES_800: f32 = 4.3 * 4.0;
+const TARGET_EDGES_800: f32 = 4.3 * 2.0;
 
 use esp_hal::i2c::master::BusTimeout;
 struct Mpu6050<'d> {
@@ -790,7 +782,7 @@ fn main() -> ! {
     // ── TEST: SINGLE FORWARD LEG ─────────────────────────────────
     info!("TEST: SINGLE FORWARD LEG — PLACE ROBOT");
 
-    forward_one(&encoders, &mut mpu, &bias, &mut drive, &mut delay);
+    execute_square(&encoders, &mut mpu, &bias, &mut drive, &mut delay);
 
     info!("LEG_TEST_COMPLETE — MEASURE DISTANCE");
     loop {
