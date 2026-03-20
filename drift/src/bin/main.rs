@@ -296,7 +296,7 @@ fn forward_one(
     let mut edges_l: u32 = 0;
     let mut edges_r: u32 = 0;
     let mut heading: f32 = 0.0;
-    let mut gz_filt: f32 = 0.0; // low pass on gz to kill spikes
+    let mut gz_filt: f32 = 0.0; 
 
     let mut pid = Pid {
         kp: 5.8,
@@ -309,16 +309,12 @@ fn forward_one(
 
     const BASE_SPEED: f32 = 120.0;
     const TAU: f32 = 0.9;
-    // ax removed from filter entirely — too noisy at speed
-    // gyro only complementary filter
     const ALPHA: f32 = 0.98;
-    const GZ_LP: f32 = 0.6; // low pass on gz
-    const GZ_GATE: f32 = 25.0; // deg/s — suppress above this
-
+    const GZ_LP: f32 = 0.6; 
+    const GZ_GATE: f32 = 25.0; 
     drive.set_speeds((BASE_SPEED - TRIM) as u16, BASE_SPEED as u16);
 
     loop {
-        // ── FAST ENCODER POLL — 800 × 1ms ────────────────────────
         for _ in 0..800 {
             let now_la = encoders.left_a.is_high();
             let now_lb = encoders.left_b.is_high();
@@ -351,10 +347,8 @@ fn forward_one(
             delay.delay_millis(1);
         }
 
-        // ── IMU READ ──────────────────────────────────────────────
         let (_, _, _, gz_raw) = mpu.read_corrected(bias);
 
-        // Gate: suppress vibration spikes on gz
         let gz_valid = if gz_raw.abs() < GZ_GATE {
             gz_raw
         } else {
@@ -362,16 +356,12 @@ fn forward_one(
             gz_filt // hold last clean value
         };
 
-        // Low pass on gz before integration
         gz_filt = GZ_LP * gz_valid + (1.0 - GZ_LP) * gz_filt;
 
-        // Gyro-only heading integration — no ax
         heading = ALPHA * (heading + gz_filt * 0.8) + (1.0 - ALPHA) * 0.0; // encoder diff could go here later
 
-        // ── PID ───────────────────────────────────────────────────
         let u = pid.claculate(0.0, heading, 0.8);
 
-        // CLAMP — critical to prevent motor stall
         let pwm_l = (BASE_SPEED - 0.9 * u - (4.5 * TRIM)).clamp(BASE_SPEED, 255.0) as u16;
         let pwm_r = (BASE_SPEED + 0.9 * u).clamp(BASE_SPEED, 255.0) as u16;
         drive.set_speeds(pwm_l, pwm_r);
@@ -421,7 +411,6 @@ fn forward_one_kalman(
     info!("STATE: FORWARD_KALMAN_STARTING");
 
     loop {
-        // ── FAST ENCODER POLL — 800 × 1ms ────────────────────────
         for _ in 0..800 {
             let now_la = encoders.left_a.is_high();
             let now_lb = encoders.left_b.is_high();
@@ -473,10 +462,8 @@ fn forward_one_kalman(
         let edge_diff = edges_r as i32 - edges_l as i32;
         let enc_heading = (edge_diff as f32 / 46.0) * (180.0 / core::f32::consts::PI);
 
-        // ── KALMAN UPDATE ─────────────────────────────────────────
         let heading_est = kalman.update(enc_heading);
 
-        // ── PID ───────────────────────────────────────────────────
         let u = pid.claculate(0.0, heading_est, 0.8);
 
         let pwm_l = (BASE_SPEED - 0.9 * u - TRIM).clamp(BASE_SPEED, 255.0) as u16;
@@ -705,11 +692,11 @@ impl<'d> Mpu6050<'d> {
         Self { i2c }
     }
     fn init(&mut self, delay: &mut Delay) {
-        self.write_reg(REG_PWR_MGMT_1, 0x00); // wake
+        self.write_reg(REG_PWR_MGMT_1, 0x00); 
         delay.delay_millis(100);
-        self.write_reg(REG_GYRO_CONFIG, 0x00); // ±250°/s range
+        self.write_reg(REG_GYRO_CONFIG, 0x00); 
         delay.delay_millis(10);
-        self.write_reg(REG_ACCEL_CONFIG, 0x08); // ±4g range
+        self.write_reg(REG_ACCEL_CONFIG, 0x08); 
         delay.delay_millis(10);
     }
     fn verify(&mut self) -> bool {
@@ -743,16 +730,10 @@ impl<'d> Mpu6050<'d> {
             .ok();
         (buf[0] as i16) << 8 | (buf[1] as i16)
     }
-
-    // CONVERTED — degrees per second
-    // ω_z [°/s] = raw / 131.0
     fn read_gyro_z_dps(&mut self) -> f32 {
         self.read_gyro_z_raw() as f32 / GYRO_SENSITIVITY
     }
 
-    // CALIBRATION — robot must be STATIONARY
-    // Returns bias in °/s units
-    // Call once at startup
     fn calibrate(&mut self, delay: &mut Delay, samples: u16) -> f32 {
         let mut sum: f32 = 0.0;
         for _ in 0..samples {
@@ -787,8 +768,6 @@ impl<'d> Mpu6050<'d> {
             .ok();
         (buf[0] as i16) << 8 | (buf[1] as i16)
     }
-
-    // a [m/s²] = (raw / 16384.0) × 9.81
     fn read_accel_ms2(&mut self) -> (f32, f32, f32) {
         let ax = (self.read_accel_x_raw() as f32 / ACCEL_SENSITIVITY) * 9.81;
         let ay = (self.read_accel_y_raw() as f32 / ACCEL_SENSITIVITY) * 9.81;
@@ -925,7 +904,7 @@ impl MadgwickFilter {
         let ay = ay / a_norm;
         let az = az / a_norm;
 
-        // Gradient descent — objective: f(q) = q* ⊗ g ⊗ q - a_meas
+        // Gradient descent. objective: f(q) = q* ⊗ g ⊗ q - a_meas
         // Analytical Jacobian J^T * f
         let f0 = 2.0 * (q1 * q3 - q0 * q2) - ax;
         let f1 = 2.0 * (q0 * q1 + q2 * q3) - ay;
@@ -1153,8 +1132,6 @@ fn main() -> ! {
     let motor_left = MotorController::new(l_dir, channel1);
     let mut drive = DifferentialDrive::new(motor_left, motor_right);
     let mut delay = Delay::new();
-
-    // ATTEMPT 1 — try this first
     let i2c = I2c::new(
         peripherals.I2C0,
         I2cConfig::default().with_frequency(Rate::from_khz(400)),
@@ -1178,7 +1155,6 @@ fn main() -> ! {
     delay.delay_millis(500);
     let bias = ImuBias::calibrate(&mut mpu, &mut delay);
     delay.delay_millis(2000);
-    // ── TEST: SINGLE TURN ONLY ───────────────────────────────────
     // Verify turn_90_ccw works before running full square
     //info!("TEST: SINGLE CCW TURN — PLACE ROBOT, STEP BACK");
     //delay.delay_millis(3000);
