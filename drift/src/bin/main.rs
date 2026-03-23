@@ -296,7 +296,7 @@ fn forward_one(
     let mut edges_l: u32 = 0;
     let mut edges_r: u32 = 0;
     let mut heading: f32 = 0.0;
-    let mut gz_filt: f32 = 0.0; 
+    let mut gz_filt: f32 = 0.0; // low pass on gz to kill spikes
 
     let mut pid = Pid {
         kp: 5.8,
@@ -309,12 +309,16 @@ fn forward_one(
 
     const BASE_SPEED: f32 = 120.0;
     const TAU: f32 = 0.9;
-    const ALPHA: f32 = 0.98;
-    const GZ_LP: f32 = 0.6; 
-    const GZ_GATE: f32 = 25.0; 
+    // ax removed from filter entirely — too noisy at speed
+    // gyro only complementary filter
+    const ALPHA: f32 = 0.96;
+    const GZ_LP: f32 = 0.6; // low pass on gz
+    const GZ_GATE: f32 = 25.0; // deg/s — suppress above this
+
     drive.set_speeds((BASE_SPEED - TRIM) as u16, BASE_SPEED as u16);
 
     loop {
+        // ── FAST ENCODER POLL — 800 × 1ms ────────────────────────
         for _ in 0..800 {
             let now_la = encoders.left_a.is_high();
             let now_lb = encoders.left_b.is_high();
@@ -338,7 +342,7 @@ fn forward_one(
                 prev_rb = now_rb;
             }
 
-            if (edges_l + edges_r) / 2 >= TARGET_EDGES_800 as u32 * 500 {
+            if (edges_l + edges_r) / 2 >= TARGET_EDGES_800 as u32 * 590 {
                 drive.execute(VehicleMotion::Stop, 0, 0);
                 info!("LEG_COMPLETE: h={} eL={} eR={}", heading, edges_l, edges_r);
                 return;
@@ -347,8 +351,10 @@ fn forward_one(
             delay.delay_millis(1);
         }
 
+        // ── IMU READ ──────────────────────────────────────────────
         let (_, _, _, gz_raw) = mpu.read_corrected(bias);
 
+        // Gate: suppress vibration spikes on gz
         let gz_valid = if gz_raw.abs() < GZ_GATE {
             gz_raw
         } else {
@@ -356,12 +362,16 @@ fn forward_one(
             gz_filt // hold last clean value
         };
 
+        // Low pass on gz before integration
         gz_filt = GZ_LP * gz_valid + (1.0 - GZ_LP) * gz_filt;
 
+        // Gyro-only heading integration — no ax
         heading = ALPHA * (heading + gz_filt * 0.8) + (1.0 - ALPHA) * 0.0; // encoder diff could go here later
 
+        // ── PID ───────────────────────────────────────────────────
         let u = pid.claculate(0.0, heading, 0.8);
 
+        // CLAMP — critical to prevent motor stall
         let pwm_l = (BASE_SPEED - 0.9 * u - (4.5 * TRIM)).clamp(BASE_SPEED, 255.0) as u16;
         let pwm_r = (BASE_SPEED + 0.9 * u).clamp(BASE_SPEED, 255.0) as u16;
         drive.set_speeds(pwm_l, pwm_r);
@@ -411,6 +421,7 @@ fn forward_one_kalman(
     info!("STATE: FORWARD_KALMAN_STARTING");
 
     loop {
+        // ── FAST ENCODER POLL — 800 × 1ms ────────────────────────
         for _ in 0..800 {
             let now_la = encoders.left_a.is_high();
             let now_lb = encoders.left_b.is_high();
@@ -434,7 +445,7 @@ fn forward_one_kalman(
                 prev_rb = now_rb;
             }
 
-            if (edges_l + edges_r) / 2 >= TARGET_EDGES_800 as u32 * 500 {
+            if (edges_l + edges_r) / 2 >= TARGET_EDGES_800 as u32 * 610 {
                 drive.execute(VehicleMotion::Stop, 0, 0);
                 info!(
                     "LEG_COMPLETE: eL={} eR={} diff={}",
@@ -447,6 +458,7 @@ fn forward_one_kalman(
 
             delay.delay_millis(1);
         }
+
         let (_, _, _, gz_raw) = mpu.read_corrected(bias);
 
         let gz_valid = if gz_raw.abs() < GZ_GATE {
@@ -458,13 +470,18 @@ fn forward_one_kalman(
 
         gz_filt = GZ_LP * gz_valid + (1.0 - GZ_LP) * gz_filt;
 
-        kalman.predict(gz_filt, 0.8);
+        // ── KALMAN PREDICT ────────────────────────────────────────
+        kalman.predict(gz_filt, 0.4);
+
+        // ── ENCODER DIFFERENTIAL MEASUREMENT ─────────────────────
         let edge_diff = edges_r as i32 - edges_l as i32;
         let enc_heading = (edge_diff as f32 / 46.0) * (180.0 / core::f32::consts::PI);
 
+        // ── KALMAN UPDATE ─────────────────────────────────────────
         let heading_est = kalman.update(enc_heading);
 
-        let u = pid.claculate(0.0, heading_est, 0.8);
+        // ── PID ───────────────────────────────────────────────────
+        let u = pid.claculate(0.0, heading_est, 0.4);
 
         let pwm_l = (BASE_SPEED - 0.9 * u - TRIM).clamp(BASE_SPEED, 255.0) as u16;
         let pwm_r = (BASE_SPEED + 0.9 * u).clamp(BASE_SPEED, 255.0) as u16;
@@ -525,8 +542,8 @@ fn turn_90_ccw(
             "TURN_CCW: heading={} eL={} eR={}",
             heading, edges_l, edges_r
         );
-        if (heading >= 0.91 - gz_bias / 1000000.0)
-            || (edges_l as f32 + edges_r as f32) / 2.0 >= 16.0
+        if (heading >= 0.92 - gz_bias / 1000000.0)
+            || (edges_l as f32 + edges_r as f32) / 2.0 >= 14.0
         {
             drive.execute(VehicleMotion::Stop, 0, 0);
             delay.delay_millis(150);
@@ -534,7 +551,17 @@ fn turn_90_ccw(
                 "TURN_COMPLETE: heading={} eL={} eR={}",
                 heading, edges_l, edges_r
             );
-            while heading > 0.92 {
+            while heading > 0.7 && heading < 0.9 {
+                let (_, _, _, gz_c) = mpu.read_corrected(bias);
+                heading -= gz_c.abs() * (dt_ms / 1000.0);
+                drive.execute(VehicleMotion::SpinCCW, 40, 0);
+                delay.delay_millis(10);
+                drive.execute(VehicleMotion::Stop, 0, 0);
+                delay.delay_millis(10);
+                info!("SLOW AND SLOW {}", heading);
+            }
+
+            while heading > 0.93 {
                 let (_, _, _, gz_c) = mpu.read_corrected(bias);
                 heading -= gz_c.abs() * (dt_ms / 1000.0);
                 drive.execute(VehicleMotion::SpinCW, 40, 0);
@@ -543,6 +570,16 @@ fn turn_90_ccw(
                 delay.delay_millis(10);
                 info!("OVERSHOOT_CORRECT: heading={}", heading);
             }
+
+            //while heading < 0.90 {
+            //    let (_, _, _, gz_c) = mpu.read_corrected(bias);
+            //    heading += gz_c.abs() * (dt_ms / 1000.0);
+            //    drive.execute(VehicleMotion::SpinCCW, 40, 0);
+            //    delay.delay_millis(50);
+            //    drive.execute(VehicleMotion::Stop, 0, 0);
+            //    delay.delay_millis(50);
+            //    info!("UNDERSHOOT_CORRECT: heading={}", heading);
+            //}
             break;
         }
         delay.delay_millis(50);
@@ -557,7 +594,23 @@ fn execute_square(
     delay: &mut Delay,
 ) {
     for leg in 0..4u8 {
-        info!("SQUARE: LEG {}", leg);
+        info!("SQUARE MADGWICK: LEG {}", leg);
+        //forward_one_kalman(encoders, mpu, bias, drive, delay);
+
+        forward_one_madgwick(encoders, mpu, bias, drive, delay);
+        //forward_one(encoders, mpu, bias, drive, delay);
+        delay.delay_millis(500);
+        if leg < 4 {
+            info!("SQUARE: TURN {}", leg);
+            turn_90_ccw(encoders, mpu, bias, drive, delay);
+            delay.delay_millis(500);
+        }
+    }
+    info!("SQUARE MADGWICK: COMPLETE — MEASURE RETURN ERROR NOW");
+
+    delay.delay_millis(10000);
+    for leg in 0..4u8 {
+        info!("SQUARE KALMAN: LEG {}", leg);
         forward_one_kalman(encoders, mpu, bias, drive, delay);
 
         //forward_one_madgwick(encoders, mpu, bias, drive, delay);
@@ -566,9 +619,28 @@ fn execute_square(
         if leg < 4 {
             info!("SQUARE: TURN {}", leg);
             turn_90_ccw(encoders, mpu, bias, drive, delay);
+            delay.delay_millis(500);
         }
     }
-    info!("SQUARE: COMPLETE — MEASURE RETURN ERROR NOW");
+    info!("SQUARE KALAMN: COMPLETE — MEASURE RETURN ERROR NOW");
+
+    delay.delay_millis(10000);
+    for leg in 0..4u8 {
+        info!("SQUARE COMPLEMENTARY: LEG {}", leg);
+        //forward_one_kalman(encoders, mpu, bias, drive, delay);
+
+        //forward_one_madgwick(encoders, mpu, bias, drive, delay);
+        forward_one(encoders, mpu, bias, drive, delay);
+        delay.delay_millis(500);
+        if leg < 4 {
+            info!("SQUARE: TURN {}", leg);
+            turn_90_ccw(encoders, mpu, bias, drive, delay);
+            delay.delay_millis(500);
+        }
+    }
+    info!("SQUARE COMPLEMENTARY: COMPLETE — MEASURE RETURN ERROR NOW");
+
+    delay.delay_millis(10000);
 }
 
 fn forward_one_open(encoders: &Encoders, drive: &mut DifferentialDrive, delay: &mut Delay) {
@@ -615,11 +687,12 @@ fn forward_one_open(encoders: &Encoders, drive: &mut DifferentialDrive, delay: &
 }
 
 fn execute_square_open_loop(encoders: &Encoders, drive: &mut DifferentialDrive, delay: &mut Delay) {
-    const TURN_MS: u32 = 1050;
+    const TURN_MS: u32 = 1130;
 
     for leg in 0..4u8 {
         info!("OPEN_LOOP: LEG {}", leg);
         drive.execute(VehicleMotion::Forward, 200, 0);
+        drive.set_speeds(200 - TRIM as u16, 200);
         delay.delay_millis(4500);
 
         if leg < 4 {
@@ -692,11 +765,11 @@ impl<'d> Mpu6050<'d> {
         Self { i2c }
     }
     fn init(&mut self, delay: &mut Delay) {
-        self.write_reg(REG_PWR_MGMT_1, 0x00); 
+        self.write_reg(REG_PWR_MGMT_1, 0x00); // wake
         delay.delay_millis(100);
-        self.write_reg(REG_GYRO_CONFIG, 0x00); 
+        self.write_reg(REG_GYRO_CONFIG, 0x00); // ±250°/s range
         delay.delay_millis(10);
-        self.write_reg(REG_ACCEL_CONFIG, 0x08); 
+        self.write_reg(REG_ACCEL_CONFIG, 0x08); // ±4g range
         delay.delay_millis(10);
     }
     fn verify(&mut self) -> bool {
@@ -730,10 +803,16 @@ impl<'d> Mpu6050<'d> {
             .ok();
         (buf[0] as i16) << 8 | (buf[1] as i16)
     }
+
+    // CONVERTED — degrees per second
+    // ω_z [°/s] = raw / 131.0
     fn read_gyro_z_dps(&mut self) -> f32 {
         self.read_gyro_z_raw() as f32 / GYRO_SENSITIVITY
     }
 
+    // CALIBRATION — robot must be STATIONARY
+    // Returns bias in °/s units
+    // Call once at startup
     fn calibrate(&mut self, delay: &mut Delay, samples: u16) -> f32 {
         let mut sum: f32 = 0.0;
         for _ in 0..samples {
@@ -768,6 +847,8 @@ impl<'d> Mpu6050<'d> {
             .ok();
         (buf[0] as i16) << 8 | (buf[1] as i16)
     }
+
+    // a [m/s²] = (raw / 16384.0) × 9.81
     fn read_accel_ms2(&mut self) -> (f32, f32, f32) {
         let ax = (self.read_accel_x_raw() as f32 / ACCEL_SENSITIVITY) * 9.81;
         let ay = (self.read_accel_y_raw() as f32 / ACCEL_SENSITIVITY) * 9.81;
@@ -904,7 +985,7 @@ impl MadgwickFilter {
         let ay = ay / a_norm;
         let az = az / a_norm;
 
-        // Gradient descent. objective: f(q) = q* ⊗ g ⊗ q - a_meas
+        // Gradient descent — objective: f(q) = q* ⊗ g ⊗ q - a_meas
         // Analytical Jacobian J^T * f
         let f0 = 2.0 * (q1 * q3 - q0 * q2) - ax;
         let f1 = 2.0 * (q0 * q1 + q2 * q3) - ay;
@@ -1046,7 +1127,7 @@ fn forward_one_madgwick(
                 prev_rb = now_rb;
             }
 
-            if (edges_l + edges_r) / 2 >= TARGET_EDGES_800 as u32 * 415 {
+            if (edges_l + edges_r) / 2 >= TARGET_EDGES_800 as u32 * 550 {
                 drive.execute(VehicleMotion::Stop, 0, 0);
                 info!(
                     "LEG_COMPLETE: yaw_f={} eL={} eR={}",
@@ -1132,6 +1213,8 @@ fn main() -> ! {
     let motor_left = MotorController::new(l_dir, channel1);
     let mut drive = DifferentialDrive::new(motor_left, motor_right);
     let mut delay = Delay::new();
+
+    // ATTEMPT 1 — try this first
     let i2c = I2c::new(
         peripherals.I2C0,
         I2cConfig::default().with_frequency(Rate::from_khz(400)),
@@ -1155,6 +1238,7 @@ fn main() -> ! {
     delay.delay_millis(500);
     let bias = ImuBias::calibrate(&mut mpu, &mut delay);
     delay.delay_millis(2000);
+    // ── TEST: SINGLE TURN ONLY ───────────────────────────────────
     // Verify turn_90_ccw works before running full square
     //info!("TEST: SINGLE CCW TURN — PLACE ROBOT, STEP BACK");
     //delay.delay_millis(3000);
@@ -1171,7 +1255,7 @@ fn main() -> ! {
     info!("TEST: SINGLE FORWARD LEG — PLACE ROBOT");
     execute_square(&encoders, &mut mpu, &bias, &mut drive, &mut delay);
 
-    //execute_square_open_loop(&encoders, &mut drive, &mut delay);
+    execute_square_open_loop(&encoders, &mut drive, &mut delay);
     info!("LEG_TEST_COMPLETE — MEASURE DISTANCE");
     loop {
         delay.delay_millis(1000);
