@@ -309,16 +309,15 @@ fn forward_one(
 
     const BASE_SPEED: f32 = 120.0;
     const TAU: f32 = 0.9;
-    // ax removed from filter entirely — too noisy at speed
+    // ax removed from filter entirely 
     // gyro only complementary filter
     const ALPHA: f32 = 0.96;
     const GZ_LP: f32 = 0.6; // low pass on gz
-    const GZ_GATE: f32 = 25.0; // deg/s — suppress above this
+    const GZ_GATE: f32 = 25.0; // deg/s 
 
     drive.set_speeds((BASE_SPEED - TRIM) as u16, BASE_SPEED as u16);
 
     loop {
-        // ── FAST ENCODER POLL — 800 × 1ms ────────────────────────
         for _ in 0..800 {
             let now_la = encoders.left_a.is_high();
             let now_lb = encoders.left_b.is_high();
@@ -351,7 +350,6 @@ fn forward_one(
             delay.delay_millis(1);
         }
 
-        // ── IMU READ ──────────────────────────────────────────────
         let (_, _, _, gz_raw) = mpu.read_corrected(bias);
 
         // Gate: suppress vibration spikes on gz
@@ -362,16 +360,12 @@ fn forward_one(
             gz_filt // hold last clean value
         };
 
-        // Low pass on gz before integration
         gz_filt = GZ_LP * gz_valid + (1.0 - GZ_LP) * gz_filt;
 
-        // Gyro-only heading integration — no ax
         heading = ALPHA * (heading + gz_filt * 0.8) + (1.0 - ALPHA) * 0.0; // encoder diff could go here later
 
-        // ── PID ───────────────────────────────────────────────────
         let u = pid.claculate(0.0, heading, 0.8);
 
-        // CLAMP — critical to prevent motor stall
         let pwm_l = (BASE_SPEED - 0.9 * u - (4.5 * TRIM)).clamp(BASE_SPEED, 255.0) as u16;
         let pwm_r = (BASE_SPEED + 0.9 * u).clamp(BASE_SPEED, 255.0) as u16;
         drive.set_speeds(pwm_l, pwm_r);
