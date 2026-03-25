@@ -415,7 +415,7 @@ fn forward_one_kalman(
     info!("STATE: FORWARD_KALMAN_STARTING");
 
     loop {
-        // ── FAST ENCODER POLL — 800 × 1ms ────────────────────────
+        // ENCODER POLL  800 × 1ms 
         for _ in 0..800 {
             let now_la = encoders.left_a.is_high();
             let now_lb = encoders.left_b.is_high();
