@@ -210,7 +210,7 @@ impl KalmanHeading {
         let rate = gz - self.bias;
         self.angle += (dt * rate) / 100.0;
 
-        // Update covariance
+        // Update covariance 
         self.p00 += dt * (dt * self.p11 - self.p01 - self.p10 + Q_ANGLE);
         self.p01 -= dt * self.p11;
         self.p10 -= dt * self.p11;
