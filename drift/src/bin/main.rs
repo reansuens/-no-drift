@@ -464,17 +464,15 @@ fn forward_one_kalman(
 
         gz_filt = GZ_LP * gz_valid + (1.0 - GZ_LP) * gz_filt;
 
-        // ── KALMAN PREDICT ────────────────────────────────────────
+        // ── KALMAN PREDICT 
         kalman.predict(gz_filt, 0.4);
 
-        // ── ENCODER DIFFERENTIAL MEASUREMENT ─────────────────────
+        // ── ENCODER DIFFERENTIAL MEASUREMENT 
         let edge_diff = edges_r as i32 - edges_l as i32;
         let enc_heading = (edge_diff as f32 / 46.0) * (180.0 / core::f32::consts::PI);
 
-        // ── KALMAN UPDATE ─────────────────────────────────────────
         let heading_est = kalman.update(enc_heading);
 
-        // ── PID ───────────────────────────────────────────────────
         let u = pid.claculate(0.0, heading_est, 0.4);
 
         let pwm_l = (BASE_SPEED - 0.9 * u - TRIM).clamp(BASE_SPEED, 255.0) as u16;
