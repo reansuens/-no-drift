@@ -10,9 +10,9 @@ This project implements advanced motion control algorithms suitable for various 
 - Support for various filtering algorithms
 
 ## Hardware Specifications
-- Microcontroller: [Specify microcontroller model]
-- Sensors: [List of used sensors]
-- Power Supply: [Power requirements]
+- Microcontroller: Saeed xiao C3
+- Sensors: MPU6050, quadrature encoders. 
+- Power Supply: Two 3.7v Lithium batteries in serial (7.4v) 
 
 ## Algorithm Details
 ### Complementary Filter
