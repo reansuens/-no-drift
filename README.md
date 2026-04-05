@@ -38,7 +38,7 @@ This section covers the control logic used to manage motors and actuators based 
 Follow these steps to build the project:
 1. Clone the repository.
 2. Install necessary dependencies.
-3. Upload the code to the microcontroller using [specify relevant tools].
+3. Upload the code to the microcontroller using `cargo espflash flash --monitor`
 4. Configure the hardware as per the specifications.
 
 ## Comparison Table of Filter Types
