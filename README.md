@@ -42,9 +42,8 @@ Follow these steps to build the project:
 4. Configure the hardware as per the specifications.
 
 ## Comparison Table of Filter Types
-| Filter Type        | Best Use Case                 | Limitations              |
-|--------------------|------------|-------------------------------|--------------------------|
-| Complementary      | Basic motion tracking         | Limited to specific conditions |
-| Madgwick       | Complex environment tracking   | Requires tuning          |
-| Kalman          | Optimal state estimation      | Computationally intensive |
-
+| Filter Type   | Best Use Case                | Limitations                     |
+|---------------|-----------------------------|----------------------------------|
+| Complementary | Basic motion tracking       | Limited to specific conditions  |
+| Madgwick      | Complex environment tracking| Requires tuning                 |
+| Kalman        | Optimal state estimation    | Computationally intensive       |
