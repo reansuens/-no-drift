@@ -18,6 +18,7 @@ This project implements advanced motion control algorithms suitable for various 
 ### Complementary Filter
 The Complementary Filter is a simple and efficient algorithm for sensor fusion that combines accelerometer and gyroscope data to provide stable orientation estimates.
 
+
 ### Madgwick Filter
 The Madgwick filter is an advanced sensor fusion algorithm that uses quaternion representation to derive orientation from accelerometer, gyroscope, and magnetometer data, optimizing for real-time performance.
 
