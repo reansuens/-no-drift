@@ -7,6 +7,7 @@ pub struct Encoders<'e> {
     pub right_b: Input<'e>, // GPIO4  — right second
 }
 
+
 impl<'e> Encoders<'e> {
     pub fn new(
         left_a: Input<'e>,
